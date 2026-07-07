@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DARO - Terminal</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body {
+            background-color: #000;
+            color: #0f0;
+            font-family: 'Courier New', Courier, monospace;
+            padding: 20px;
+            margin: 0;
+        }
+        h1 { text-align: center; border-bottom: 1px solid #0f0; padding-bottom: 10px; }
+        .setup-screen, .game-screen { display: flex; flex-direction: column; gap: 15px; max-width: 600px; margin: 0 auto; }
+        .hidden { display: none !important; }
+        input, button {
+            background: #000;
+            border: 1px solid #0f0;
+            color: #0f0;
+            padding: 8px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 16px;
+        }
+        button:hover { background: #030; cursor: pointer; }
+        /* Made this text box wider as requested */
+        #peerIdInput { width: 320px; } 
+        .columns { display: flex; justify-content: space-between; gap: 20px; margin-top: 20px; }
+        .column { flex: 1; border: 1px solid #0f0; padding: 10px; height: 250px; overflow-y: auto; }
+        .status { border: 1px dashed #0f0; padding: 10px; min-height: 20px; margin-top: 10px; }
+        .win-history { margin-top: 20px; border-top: 1px solid #0f0; padding-top: 10px; }
+        .secret-display { color: #ff0; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1>=== DARO TERMINAL ===</h1>
+
+    <div id="setupScreen" class="setup-screen">
+        <div>
+            <label>ENTER YOUR NAME: </label>
+            <input type="text" id="playerNameInput" placeholder="Player">
+        </div>
+        <div>
+            <button id="hostBtn">HOST GAME (GET CONNECTION ID)</button>
+        </div>
+        <div>
+            <label>CONNECT TO ROOM ID: </label>
+            <input type="text" id="peerIdInput" placeholder="Enter Short Connection ID Here">
+            <button id="joinBtn">JOIN GAME</button>
+        </div>
+        <div id="connectionStatus" class="status">Status: Awaiting action...</div>
+    </div>
+
+    <div id="gameScreen" class="game-screen hidden">
+        <div>ROOM ID: <span id="displayPeerId" style="color: #fff;"></span></div>
+        <div id="secretCodeDisplay">SECRET CODE (LOCKED NUMBER): <span id="displaySecretNumber" class="secret-display">NOT LOCKED YET</span></div>
+        <div id="turnIndicator" class="status">Connecting...</div>
+
+        <div id="lockSection">
+            <label>LOCK YOUR 4-DIGIT NUMBER: </label>
+            <input type="password" id="lockInput" maxlength="4" placeholder="****">
+            <button id="lockBtn">LOCK</button>
+        </div>
+
+        <div id="guessSection" class="hidden">
+            <label>ENTER 4-DIGIT GUESS: </label>
+            <input type="text" id="guessInput" maxlength="4" placeholder="1234">
+            <button id="guessBtn">SUBMIT GUESS</button>
+        </div>
+
+        <div class="columns">
+            <div class="column">
+                <h3>YOUR GUESSES</h3>
+                <div id="myLogs"></div>
+            </div>
+            <div class="column">
+                <h3>OPPONENT GUESSES</h3>
+                <div id="oppLogs"></div>
+            </div>
+        </div>
+
+        <div class="win-history">
+            <h3>WIN HISTORY</h3>
+            <div id="winHistoryLog">No games won yet.</div>
+        </div>
+    </div>
+
+    <script>
+        let peer = null;
+        let conn = null;
+        let myName = "";
+        let oppName = "Opponent";
+        let mySecretNum = "";
+        let oppSecretNum = "";
+        let myTurn = false;
+        let winHistory = { me: 0, opp: 0 };
+
+        const setupScreen = document.getElementById('setupScreen');
+        const gameScreen = document.getElementById('gameScreen');
+        const connStatus = document.getElementById('connectionStatus');
+        const turnIndicator = document.getElementById('turnIndicator');
+        const lockSection = document.getElementById('lockSection');
+        const guessSection = document.getElementById('guessSection');
+
+        if(localStorage.getItem('daro_history')) {
+            winHistory = JSON.parse(localStorage.getItem('daro_history'));
+            updateWinHistoryUI();
+        }
+
+        // Generate a random short string for easy room sharing (5 alphanumeric characters)
+        function generateShortId() {
+            return Math.random().toString(36).substring(2, 7).toUpperCase();
+        }
+
+        // HOST BUTTON
+        document.getElementById('hostBtn').onclick = () => {
+            myName = document.getElementById('playerNameInput').value.trim() || "Host";
+            connStatus.innerText = "Status: Generating Room ID...";
+            
+            const shortRoomId = generateShortId();
+            peer = new Peer(shortRoomId);
+            
+            peer.on('open', (id) => {
+                connStatus.innerText = "Status: Waiting for player 2...";
+                document.getElementById('displayPeerId').innerText = id;
+                setupScreen.classList.add('hidden');
+                gameScreen.classList.remove('hidden');
+                turnIndicator.innerText = "Waiting for an opponent to connect...";
+            });
+
+            peer.on('connection', (incomingConn) => {
+                conn = incomingConn;
+                handleConnection();
+            });
+
+            peer.on('error', (err) => {
+                // If ID is taken, retry with a fresh one automatically
+                if(err.type === 'unavailable-id') {
+                    document.getElementById('hostBtn').click();
+                }
+            });
+        };
+
+        // JOIN BUTTON
+        document.getElementById('joinBtn').onclick = () => {
+            myName = document.getElementById('playerNameInput').value.trim() || "Joiner";
+            const targetId = document.getElementById('peerIdInput').value.trim().toUpperCase();
+            if (!targetId) return alert("Please enter the Room ID first.");
+            
+            connStatus.innerText = "Status: Connecting to room...";
+            const customJoinerId = generateShortId();
+            peer = new Peer(customJoinerId);
+            
+            peer.on('open', (id) => {
+                document.getElementById('displayPeerId').innerText = targetId;
+                conn = peer.connect(targetId);
+                handleConnection();
+            });
+        };
+
+        // HANDLE P2P GAME DATA Exchange
+        function handleConnection() {
+            conn.on('open', () => {
+                setupScreen.classList.add('hidden');
+                gameScreen.classList.remove('hidden');
+                conn.send({ type: 'INIT', name: myName });
+            });
+
+            conn.on('data', (data) => {
+                if (data.type === 'INIT') {
+                    oppName = data.name;
+                    turnIndicator.innerText = `Connected to ${oppName}. Please lock your 4-digit number.`;
+                }
+                if (data.type === 'LOCKED') {
+                    oppSecretNum = data.number;
+                    if (mySecretNum) startMatch();
+                }
+                if (data.type === 'GUESS') {
+                    evaluateOpponentGuess(data.guess);
+                }
+            });
+        }
+
+        // LOCK NUMBER LOGIC
+        document.getElementById('lockBtn').onclick = () => {
+            const val = document.getElementById('lockInput').value.trim();
+            if (val.length !== 4 || isNaN(val)) return alert("Error: Must be exactly 4 digits.");
+            
+            mySecretNum = val;
+            
+            // Display your locked number in plain text on screen as the secret code
+            document.getElementById('displaySecretNumber').innerText = val;
+            lockSection.classList.add('hidden');
+            
+            conn.send({ type: 'LOCKED', number: val });
+            
+            if (oppSecretNum) {
+                startMatch();
+            } else {
+                turnIndicator.innerText = "Number locked. Waiting for opponent to lock theirs...";
+            }
+        };
+
+        function startMatch() {
+            // Player who initiated the setup screen input string is Joiner, Host goes first.
+            myTurn = document.getElementById('peerIdInput').value.trim() === "";
+            updateTurnUI();
+            guessSection.classList.remove('hidden');
+        }
+
+        // PROCESS GUESS ACTIONS
+        document.getElementById('guessBtn').onclick = () => {
+            if (!myTurn) return alert("Wait! It's your opponent's turn.");
+            const guess = document.getElementById('guessInput').value.trim();
+            if (guess.length !== 4 || isNaN(guess)) return alert("Error: Enter a 4-digit guess.");
+
+            let correct = 0;
+            for (let i = 0; i < 4; i++) {
+                if (guess[i] === oppSecretNum[i]) correct++;
+            }
+
+            let msg = "";
+            if (correct === 4) {
+                msg = "MATCHED ALL DIGITS!";
+                alert(`YOU WIN! The number was ${oppSecretNum}`);
+                winHistory.me++;
+                saveAndRefreshHistory();
+                conn.send({ type: 'GUESS', guess: guess });
+                resetRound();
+                return;
+            } else if (correct > 0) {
+                msg = `${correct} digit${correct > 1 ? 's' : ''} correct`;
+            } else {
+                msg = "Try again";
+            }
+
+            alert(`Your Guess (${guess}): ${msg}`);
+            logToColumn('myLogs', `${guess} -> ${msg}`);
+            
+            conn.send({ type: 'GUESS', guess: guess });
+            myTurn = false;
+            updateTurnUI();
+            document.getElementById('guessInput').value = "";
+        };
+
+        function evaluateOpponentGuess(guess) {
+            let correct = 0;
+            for (let i = 0; i < 4; i++) {
+                if (guess[i] === mySecretNum[i]) correct++;
+            }
+
+            let msg = "";
+            if (correct === 4) {
+                msg = "MATCHED ALL DIGITS!";
+                alert(`${oppName} guessed your number ${mySecretNum} correctly. You lose!`);
+                winHistory.opp++;
+                saveAndRefreshHistory();
+                resetRound();
+                return;
+            } else if (correct > 0) {
+                msg = `${correct} digit${correct > 1 ? 's' : ''} correct`;
+            } else {
+                msg = "Try again";
+            }
+
+            logToColumn('oppLogs', `${guess} -> ${msg}`);
+            myTurn = true;
+            updateTurnUI();
+        }
+
+        // INTERFACE UTILITIES
+        function updateTurnUI() {
+            turnIndicator.innerText = myTurn ? "YOUR TURN: Enter a guess." : `Waiting for ${oppName} to guess...`;
+        }
+
+        function logToColumn(id, text) {
+            document.getElementById(id).innerHTML += `<div>> ${text}</div>`;
+        }
+
+        function saveAndRefreshHistory() {
+            localStorage.setItem('daro_history', JSON.stringify(winHistory));
+            updateWinHistoryUI();
+        }
+
+        function updateWinHistoryUI() {
+            document.getElementById('winHistoryLog').innerText = `YOU: ${winHistory.me} Wins | OPPONENT: ${winHistory.opp} Wins`;
+        }
+
+        function resetRound() {
+            mySecretNum = "";
+            oppSecretNum = "";
+            document.getElementById('myLogs').innerHTML = "";
+            document.getElementById('oppLogs').innerHTML = "";
+            document.getElementById('lockInput').value = "";
+            document.getElementById('guessInput').value = "";
+            document.getElementById('displaySecretNumber').innerText = "NOT LOCKED YET";
+            lockSection.classList.remove('hidden');
+            guessSection.classList.add('hidden');
+            turnIndicator.innerText = "Round over. Lock a new number to start a new match!";
+        }
+    </script>
+</body>
+</html>
